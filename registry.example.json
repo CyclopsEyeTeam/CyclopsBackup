@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "device": {},
+  "projects": [
+    {
+      "name": "ExampleProject",
+      "source": "/path/to/Projects/ExampleProject",
+      "destination": "Projects/ExampleProject",
+      "required_markers": ["README.md"],
+      "excludes": []
+    },
+    {
+      "name": "ExampleEvidence",
+      "source": "/path/to/Preservation",
+      "destination": "Archives/ExampleEvidence",
+      "required_markers": [],
+      "excludes": []
+    }
+  ]
+}

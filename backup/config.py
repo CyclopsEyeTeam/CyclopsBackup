@@ -1,0 +1,145 @@
+from dataclasses import dataclass
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import subprocess
+
+
+class BackupError(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class Device:
+    mountpoint: Path
+    uuid: str
+    label: str
+    fstype: str
+
+
+def command(args):
+    result = subprocess.run(args, capture_output=True, text=True)
+    if result.returncode:
+        raise BackupError(f'{args[0]} failed: {result.stderr.strip()}')
+    return result.stdout
+
+
+def mount_info(path):
+    data = json.loads(command(['findmnt', '--json', '--target', str(path),
+                              '--output', 'TARGET,SOURCE,FSTYPE,UUID,LABEL,OPTIONS']))
+    return data['filesystems'][0]
+
+
+def devices():
+    """Transport is inherited from the disk. No device-name assumptions."""
+    data = json.loads(command(['lsblk', '--json', '--paths', '--output',
+                              'NAME,TYPE,FSTYPE,LABEL,UUID,MOUNTPOINTS,TRAN,RM']))
+    rows = []
+    def visit(node, usb=False):
+        usb = usb or node.get('tran') == 'usb'
+        for target in node.get('mountpoints') or []:
+            if target and node.get('uuid'):
+                rows.append({'uuid': node['uuid'], 'label': node.get('label') or '',
+                             'fstype': node.get('fstype'), 'mountpoint': target, 'usb': usb})
+        for child in node.get('children', []):
+            visit(child, usb)
+    for node in data['blockdevices']:
+        visit(node)
+    return rows
+
+
+def resolve_device(config):
+    expected = config.get('device', {})
+    uuid, label = expected.get('uuid'), expected.get('label')
+    if not (uuid or label):
+        raise BackupError('Backup USB is not configured. Choose it in the launcher or run configure.')
+    rows = [d for d in devices() if (d['uuid'] == uuid if uuid else d['label'] == label)]
+    if not rows:
+        raise BackupError('Expected USB is not mounted. Plug it in and open it in Files, then retry.')
+    if len(rows) != 1:
+        raise BackupError('USB identity is ambiguous; configure its unique filesystem UUID.')
+    row = rows[0]
+    if not row['usb']:
+        raise BackupError('Expected filesystem is on an internal disk, not a USB device.')
+    target = Path(row['mountpoint'])
+    if target.is_symlink() or not target.is_dir() or not os.path.ismount(target):
+        raise BackupError('USB mountpoint is absent or unsafe.')
+    mounted = mount_info(target)
+    if mounted.get('uuid') != row['uuid'] or mounted.get('target') != str(target):
+        raise BackupError('USB mount identity changed. Retry with the expected device mounted.')
+    if row['fstype'] not in ('ext4', 'xfs', 'btrfs'):
+        raise BackupError('Use an ext4, xfs or btrfs USB filesystem to preserve Git, permissions and links. No disk was changed.')
+    return Device(target, row['uuid'], row['label'], row['fstype'])
+
+
+def relative_path(value):
+    if not isinstance(value, str) or not value or '\\' in value or '\x00' in value:
+        raise BackupError('Invalid relative path in registry.')
+    path = PurePosixPath(value)
+    if path.is_absolute() or any(s in ('..', '.') for s in value.split('/')):
+        raise BackupError(f'Unsafe path in registry: {value!r}')
+    return path
+
+
+def validate_config(data, allow_empty=False, canonical_sources=False):
+    if not isinstance(data, dict) or data.get('version') != 1 or not isinstance(data.get('projects'), list):
+        raise BackupError('Registry must have version 1 and a project list.')
+    if not data['projects'] and not allow_empty:
+        raise BackupError('No project folders configured. Launch the setup wizard or use project-add.')
+    names, destinations, sources = set(), [], []
+    for project in data['projects']:
+        name = project.get('name', '')
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', name) or name in names:
+            raise BackupError('Project names must be unique simple folder names.')
+        names.add(name)
+        dest = relative_path(project.get('destination'))
+        if len(dest.parts) != 2 or dest.parts[0] not in ('Projects', 'Archives'):
+            raise BackupError('Destination must be Projects/name or Archives/name.')
+        if dest.parts[1] == 'PreviousVersions' or dest in destinations:
+            raise BackupError('Duplicate or reserved destination in registry.')
+        destinations.append(dest)
+        source = Path(project.get('source', ''))
+        if not source.is_absolute() or '\x00' in str(source):
+            raise BackupError('Every source must be an explicit absolute path.')
+        # Saved manifests describe historical source paths on another computer.
+        # Only live settings may depend on the current source filesystem.
+        if canonical_sources and source != source.resolve():
+            raise BackupError(f'Source must use its canonical location: {source.resolve()}')
+        if any(source == s or source in s.parents or s in source.parents for s in sources):
+            raise BackupError('Overlapping sources would create duplicate or recursive backups.')
+        sources.append(source)
+        for exclusion in project.get('excludes', []):
+            path = relative_path(exclusion['path'])
+            if '.git' in path.parts or not exclusion.get('reason'):
+                raise BackupError('Exclusions need a reason and cannot exclude Git metadata.')
+        for marker in project.get('required_markers', []):
+            relative_path(marker)
+    return data
+
+
+def load_config(path, allow_empty=False):
+    try:
+        path = Path(path)
+        if allow_empty and not path.exists() and not path.is_symlink():
+            return {'version': 1, 'device': {}, 'projects': []}
+        return validate_config(json.loads(path.read_text()), allow_empty=allow_empty, canonical_sources=True)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise BackupError(f'Cannot read registry: {exc}') from exc
+
+
+def save_config(path, config):
+    validate_config(config, allow_empty=True, canonical_sources=True)
+    path = Path(path)
+    if path.is_symlink():raise BackupError('Settings file is a symlink; choose a regular file.')
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temp = path.with_suffix('.json.tmp')
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            stream.write(json.dumps(config, indent=2) + '\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        temp.replace(path)
+    finally:
+        if temp.exists():temp.unlink()
