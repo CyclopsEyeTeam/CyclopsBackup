@@ -405,3 +405,64 @@ def verify_manifest(path, root):
             result['failures'].append(f'{project["name"]}: {exc}')
     result['ok']=not result['failures']
     return result
+
+
+ITEM_KINDS = {'f': 'file', 'd': 'folder', 'L': 'link', 'D': 'device', 'S': 'special'}
+
+
+def parse_itemized(output, sizes):
+    """Turn rsync --out-format='%i %n' lines into new/changed/metadata entries."""
+    import re
+    changes = []
+    for line in output.splitlines():
+        match = re.fullmatch(r'([<>ch.])([fdLDS])([^ ]{9}) (.+)', line)
+        if not match:continue
+        flag, kind, attrs, name = match.groups()
+        path = name.rstrip('/')
+        if path in ('', '.'):continue
+        if flag == '.':action = 'metadata'
+        elif set(attrs) == {'+'}:action = 'new'
+        else:action = 'changed'
+        changes.append({'action': action, 'kind': ITEM_KINDS[kind], 'path': path,
+                        'size': sizes.get(path) if kind == 'f' else None})
+    return changes
+
+
+def change_preview(config, device, progress=lambda message:None, exact=False):
+    """Read-only: list exactly which items the next run would copy to the USB.
+
+    Runs the full normal review first (all safety checks), then an itemized
+    rsync dry-run per folder. Quick mode compares size/time like the estimate;
+    exact mode compares checksums like the real copy, which reads all data.
+    Nothing is written to the USB or the sources.
+    """
+    import tempfile
+    report = preview(config, device, progress)
+    report['status'] = 'change-preview'
+    report['change_mode'] = 'exact (checksum)' if exact else 'quick (size and time)'
+    if not report['ok'] or device is None:return report
+    for row in report['projects']:
+        progress(f"Listing changes for {row['name']}")
+        try:
+            assert_device(config, device)
+            destination = device.mountpoint/'CyclopsBackup'/row['destination']
+            guard_path(device.mountpoint, destination)
+            sizes = {e['path']: e['size'] for e in row['files'] if e['kind'] == 'file'}
+            with tempfile.TemporaryDirectory(prefix='cyclops-preview-') as empty:
+                target = destination if destination.exists() else Path(empty)
+                args = rsync_args(row, target, dry=True)
+                split = args.index('--')
+                args[split:split] = ['--out-format=%i %n'] + (['--checksum'] if exact else [])
+                result = subprocess.run(args, capture_output=True, text=True,
+                                        env=dict(os.environ, LC_ALL='C'))
+            if result.returncode:raise BackupError(f'rsync preview failed ({result.returncode}): {result.stderr.strip()}')
+            row['changes'] = parse_itemized(result.stdout, sizes)
+            row['change_counts'] = {a: sum(c['action'] == a for c in row['changes'])
+                                    for a in ('new', 'changed', 'metadata')}
+            if exact:row['estimated_transfer_bytes'] = rsync_stats(result.stdout)
+        except (BackupError, OSError, ValueError) as exc:
+            row['failures'].append(str(exc));report['failures'].append(f'{row["name"]}: {exc}')
+    if exact and not report['failures']:
+        report['estimated_transfer_bytes'] = sum(r['estimated_transfer_bytes'] for r in report['projects'])
+    report['ok'] = not report['failures']
+    return report

@@ -48,7 +48,10 @@ existing launcher is left untouched; the installer reports the conflict.
 5. Leave the USB connected while copying and SHA-256 verification finish.
 6. Only after **SAFE TO EJECT USB**, use Files → Eject, then unplug it.
 
-Later launches reuse the explicit registry and pinned filesystem UUID. No
+Later launches open the **control panel**: review and back up, preview what will
+be copied, choose or change the backup USB, add or remove folders, leave out a
+file or subfolder, or put a left-out item back. Every change is saved straight
+away and copies nothing. Later launches reuse the explicit registry and pinned filesystem UUID. No
 projects are discovered automatically. Missing/moved/empty folders, a missing
 USB, insufficient space, changed source data or failed verification block success.
 Reformatting a USB changes its UUID and requires configuration again.
@@ -65,18 +68,40 @@ backup reports. Settings and reports can contain private paths; keep them out of
 public repositories. Registry files are written with mode 0600. Backups themselves
 are ordinary files, without encryption supplied by this utility.
 
-## Add or remove folders
+## Add or remove folders, files and the USB
 
-Terminal setup and maintenance are available without a desktop:
+Everything below is in the desktop control panel. The same controls work from a
+terminal without a desktop:
 
 ```sh
 python3 cyclops-backup project-add --name MyProject --source "/absolute/path/My Project"
 python3 cyclops-backup project-add --name Evidence --source "/absolute/path/Evidence" --archive
 python3 cyclops-backup devices
 python3 cyclops-backup configure --uuid YOUR_FILESYSTEM_UUID
+python3 cyclops-backup projects                     # what is registered
+python3 cyclops-backup project-remove --name Evidence
+python3 cyclops-backup exclude --name MyProject --path "/absolute/path/My Project/cache" --reason "rebuildable cache"
+python3 cyclops-backup include --name MyProject --path cache
 python3 cyclops-backup preview
+python3 cyclops-backup preview --files               # list every item the next run copies
+python3 cyclops-backup preview --files --exact       # compare contents like the real copy
 python3 cyclops-backup run
 ```
+
+**Removing a folder** only takes it out of the backup set. Its source folder and
+any copy already on the USB are left exactly as they are.
+
+**Leaving out a file or subfolder** needs a reason and is refused for Git-tracked
+files, `.git` itself, anything outside the folder, and names containing `*`, `?`
+or `[` (rsync would read those as wildcards). Single files outside a registered
+folder cannot be added on their own; register the folder that holds them.
+
+**Copy preview** is read-only. It runs the normal review first, then lists each
+folder's items as NEW (not on the USB yet), CHANGED (will be updated; the old USB
+copy goes to PreviousVersions) or PERMS (only permissions/time). Quick mode
+compares size and time; **Exact** compares contents with checksums exactly like
+the real copy, so it reads every file on both sides and is slow on large folders.
+The full list is saved as `RUN.changes.txt` with the local reports.
 
 `project-add` checks the source, records its canonical location, and copies nothing.
 Direct symlink roots are refused; parent-directory aliases are resolved to prevent
@@ -115,7 +140,7 @@ folders containing nested repositories or unique evidence.
 - The review shows total included data and **estimated** transfer separately.
   Its fast size/mtime check can differ from the actual checksum decision: touched
   identical files can overstate transfer; same-size/mtime corruption can understate
-  it. This release does not show new/changed/reused columns. Transfer counts are
+  it. Use the copy preview for a per-item list. Transfer counts are
   logical file-content bytes, not physical USB writes or hashing reads.
 
 Linux modes, symlinks and hard links are preserved. Owner/group identities,

@@ -73,3 +73,49 @@ def write_reports(report, folder):
     report['local_text'] = str(folder / (report['run_id']+'.txt'))
     atomic_write(report['local_json'], json.dumps(report, indent=2) + '\n')
     atomic_write(report['local_text'], readable(report))
+
+
+CHANGE_LABELS = {'new': 'NEW    ', 'changed': 'CHANGED', 'metadata': 'PERMS  '}
+
+
+def changes_text(report, limit=None):
+    """What the next run would copy, per folder. limit caps lines per folder."""
+    lines = ['Cyclops Backup — copy preview (nothing has been copied)',
+             f"Compared by: {report.get('change_mode', 'quick (size and time)')}",
+             f"USB: {(report.get('device') or {}).get('label') or (report.get('device') or {}).get('uuid') or 'not connected'}",
+             f"Estimated transfer: {size_text(report.get('estimated_transfer_bytes'))}",
+             f"Free space: {size_text(report.get('free_bytes'))}", '',
+             'NEW = not on the USB yet.  CHANGED = will be updated; the old USB copy is kept',
+             'under Archives/PreviousVersions.  PERMS = only permissions/time are updated.',
+             'Files removed from your computer stay on the USB. Nothing on the USB is deleted.', '']
+    for p in report.get('projects', []):
+        counts = p.get('change_counts')
+        lines.append(f"{p['name']}  →  {p['destination']}")
+        for error in p.get('failures', []):lines.append(f'  FAILED: {error}')
+        if counts is None:
+            lines.append('');continue
+        lines.append(f"  {counts['new']} new, {counts['changed']} changed, {counts['metadata']} permission/time-only")
+        for e in p.get('excludes', []):lines.append(f"  Left out: {e['path']} — {e['reason']}")
+        changes = p.get('changes', [])
+        if not changes:lines.append('  Already up to date — nothing to copy.')
+        shown = changes if limit is None else changes[:limit]
+        for c in shown:
+            size = f"  ({size_text(c['size'])})" if c.get('size') is not None else ''
+            suffix = '/' if c['kind'] == 'folder' else ''
+            lines.append(f"  {CHANGE_LABELS[c['action']]} {c['path']}{suffix}{size}")
+        if len(shown) < len(changes):
+            lines.append(f"  … and {len(changes) - len(shown):,} more (full list saved in the local report)")
+        lines.append('')
+    if report.get('failures'):
+        lines.append('PREVIEW BLOCKED — fix these before backing up:')
+        lines.extend(f'  {f}' for f in report['failures'])
+    return '\n'.join(lines) + '\n'
+
+
+def write_change_list(report, folder):
+    """Save the complete, uncapped change list next to the normal local reports."""
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder/(report['run_id'] + '.changes.txt')
+    atomic_write(path, changes_text(report))
+    return path

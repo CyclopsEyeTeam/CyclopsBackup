@@ -1,5 +1,19 @@
 # Release notes
 
+## 0.2.0 — 2026-10-06
+
+- Desktop control panel after first setup: review and back up, copy preview,
+  choose/change USB, add folder (project or evidence), remove folder, leave out
+  a file or subfolder, put an item back. Cancel/Esc never picks a default.
+- Copy preview: read-only per-item NEW / CHANGED / PERMS list, quick (size/time)
+  or exact (checksum, matching the real copy). Full list saved locally.
+- Terminal: `projects`, `project-remove`, `exclude`, `include`,
+  `preview --files [--exact] [--limit N]`.
+- Exclusions added through the controls refuse Git-tracked paths, `.git`,
+  paths outside the folder and wildcard characters.
+- 17 new fixture tests (62 total). Copy and verification engine unchanged:
+  new code is appended alongside it.
+
 ## 0.1.0 — 2026-10-05 (public preview)
 
 First public release of Cyclops Backup for Linux/Zorin/Ubuntu.

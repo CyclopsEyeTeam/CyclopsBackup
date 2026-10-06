@@ -18,6 +18,10 @@ def default_report_dir():
     return Path(os.environ.get('XDG_STATE_HOME') or Path.home()/'.local/state')/'cyclops-backup/reports'
 
 
+def config_exclusion(config,name):
+    return next(p for p in config['projects'] if p['name']==name)['excludes'][-1]['path']
+
+
 def main(argv=None):
     parser=argparse.ArgumentParser(description='Cyclops Backup — independent weekly USB backups')
     parser.add_argument('--version',action='version',version='Cyclops Backup '+__version__)
@@ -31,7 +35,20 @@ def main(argv=None):
     add.add_argument('--name',required=True,help='Unique simple backup folder name')
     add.add_argument('--source',required=True,type=Path,help='Actual source folder (spaces supported)')
     add.add_argument('--archive',action='store_true',help='Place evidence under Archives instead of Projects')
-    sub.add_parser('preview',help='Read-only dry-run; saves only a local report')
+    sub.add_parser('projects',help='List registered folders, exclusions and the pinned USB')
+    rm=sub.add_parser('project-remove',help='Stop backing up one folder; source and USB copy are untouched')
+    rm.add_argument('--name',required=True)
+    ex=sub.add_parser('exclude',help='Leave one file or subfolder out of a registered folder')
+    ex.add_argument('--name',required=True,help='Registered folder name')
+    ex.add_argument('--path',required=True,help='Item inside the folder (absolute or relative)')
+    ex.add_argument('--reason',required=True,help='Why it is safe to leave out')
+    inc=sub.add_parser('include',help='Put a previously excluded item back into the backup')
+    inc.add_argument('--name',required=True)
+    inc.add_argument('--path',required=True)
+    pv=sub.add_parser('preview',help='Read-only dry-run; saves only a local report')
+    pv.add_argument('--files',action='store_true',help='List every item the next run would copy')
+    pv.add_argument('--exact',action='store_true',help='With --files: compare checksums like the real copy (reads all data)')
+    pv.add_argument('--limit',type=int,default=200,help='With --files: lines shown per folder (0 = all; full list is always saved)')
     run=sub.add_parser('run',help='Review and confirm, then copy and verify')
     run.add_argument('--yes',action='store_true',help='Deliberately approve the entire configured backup')
     sub.add_parser('gui',help='Open the desktop wizard')
@@ -51,6 +68,26 @@ def main(argv=None):
             config=add_project(config,args.name,args.source,args.archive)
             save_config(args.config,config)
             print(f'Registered {args.name}. Settings: {args.config}. No data copied.');return 0
+        if args.action=='projects':
+            device=config.get('device') or {}
+            print(f"USB: {device.get('label') or '-'} ({device.get('uuid') or 'not configured'})")
+            if not config['projects']:print('No folders registered.')
+            for p in config['projects']:
+                print(f"{p['name']}: {p['source']} -> {p['destination']}")
+                for e in p.get('excludes',[]):print(f"    left out: {e['path']} - {e['reason']}")
+            return 0
+        if args.action in ('project-remove','exclude','include'):
+            from .setup import add_exclusion, remove_exclusion, remove_project
+            if args.action=='project-remove':
+                config=remove_project(config,args.name)
+                message=f'Removed {args.name} from the backup set. Its source and any USB copy were not touched.'
+            elif args.action=='exclude':
+                config=add_exclusion(config,args.name,args.path,args.reason)
+                message=f'{args.name}: now leaving out {config_exclusion(config,args.name)}. Review again before backing up.'
+            else:
+                config=remove_exclusion(config,args.name,args.path)
+                message=f'{args.name}: item is back in the backup set.'
+            save_config(args.config,config);print(message);return 0
         for dep in ('rsync','git','lsblk','findmnt','sync'):
             if not shutil.which(dep):raise BackupError(f'Required system tool missing: {dep}')
         if args.action=='configure':
@@ -65,6 +102,16 @@ def main(argv=None):
         problem=None
         try:device=resolve_device(config)
         except BackupError as exc:device=None;problem=str(exc)
+        if args.action=='preview' and args.files:
+            if device is None:raise BackupError(problem)
+            from .core import change_preview
+            from .report import changes_text, write_change_list
+            report=change_preview(config,device,exact=args.exact)
+            write_reports(report,args.report_dir)
+            saved=write_change_list(report,args.report_dir)
+            print(changes_text(report,limit=args.limit or None))
+            print(f'Full list: {saved}')
+            return 0 if report['ok'] else 2
         report=preview(config,device)
         if problem:report['failures'].append(problem);report['ok']=False
         write_reports(report,args.report_dir)

@@ -1,3 +1,13 @@
+# v0.2.0 additions
+
+Validated on Linux with Python 3.12 and rsync 3.2.7 on 2026-10-06: **62 tests**
+pass (45 original + 17 control/preview). The 0.1.0 copy, verification and
+manifest functions are byte-identical; preview and registry controls are new
+functions. Preview tests prove no USB or source bytes change, exact mode detects
+same-size/time corruption that quick mode cannot, and exclusions/removals never
+alter sources or existing USB copies. Desktop panel tests replace only Zenity
+responses. Native Zenity rendering was not exercised on a physical desktop.
+
 # v0.1.0 release validation
 
 Validated on Linux with Python 3.12, system rsync and Git on 2026-10-05.
