@@ -82,7 +82,61 @@ def relative_path(value):
     return path
 
 
+DEFAULT_PROFILE = 'Default'
+
+
+def profile_name(value):
+    """Profiles are labels in the settings file only; they never become paths."""
+    if (not isinstance(value, str) or not value.strip() or value != value.strip() or len(value) > 40
+            or any(c in value for c in '/\\|\t\n\r\x00')):
+        raise BackupError('Profile names: 1-40 characters, no slashes, | or tabs, no leading/trailing spaces.')
+    return value
+
+
+def with_profiles(config):
+    """Copy of config with a profiles table whose active entry mirrors config['projects'].
+
+    'projects' is always the active profile's folder list, so the copy and
+    verification engine keeps seeing exactly the shape it always has.
+    """
+    config = dict(config)
+    profiles = config.get('profiles')
+    if not isinstance(profiles, dict) or not profiles:
+        profiles = {config.get('profile') or DEFAULT_PROFILE: list(config.get('projects', []))}
+    profiles = dict(profiles)
+    active = config.get('profile')
+    if active not in profiles:active = next(iter(profiles))
+    if 'projects' in config:profiles[active] = list(config['projects'])
+    config.update(profiles=profiles, profile=active, projects=list(profiles[active]))
+    return config
+
+
+def run_view(config):
+    """What one backup run sees: the active profile only (also what manifests record)."""
+    view = {k: v for k, v in config.items() if k != 'profiles'}
+    view['profile'] = config.get('profile') or DEFAULT_PROFILE
+    return view
+
+
 def validate_config(data, allow_empty=False, canonical_sources=False):
+    validate_projects(data, allow_empty, canonical_sources)
+    if isinstance(data.get('profiles'), dict):
+        if data.get('profile') not in data['profiles']:
+            raise BackupError('Active profile is missing from the profile list.')
+        owners = {}
+        for name, projects in with_profiles(data)['profiles'].items():
+            profile_name(name)
+            validate_projects({'version': 1, 'projects': projects}, True, canonical_sources)
+            for p in projects:
+                # One USB folder per source: two profiles may share a folder, never a destination.
+                seen = owners.setdefault(p['destination'], (p['source'], name))
+                if seen[0] != p['source']:
+                    raise BackupError(f"Profiles {seen[1]!r} and {name!r} both use {p['destination']} "
+                                      'on the USB for different folders. Choose another backup name.')
+    return data
+
+
+def validate_projects(data, allow_empty=False, canonical_sources=False):
     if not isinstance(data, dict) or data.get('version') != 1 or not isinstance(data.get('projects'), list):
         raise BackupError('Registry must have version 1 and a project list.')
     if not data['projects'] and not allow_empty:
@@ -90,8 +144,13 @@ def validate_config(data, allow_empty=False, canonical_sources=False):
     names, destinations, sources = set(), [], []
     for project in data['projects']:
         name = project.get('name', '')
-        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', name) or name in names:
-            raise BackupError('Project names must be unique simple folder names.')
+        if not name:
+            raise BackupError('Give the folder a backup name.')
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', name):
+            raise BackupError(f'Backup name {name!r} can only use letters, numbers, dots, dashes and '
+                              'underscores, and must start with a letter or number.')
+        if name in names:
+            raise BackupError(f'{name!r} is already used in this profile. Choose another backup name.')
         names.add(name)
         dest = relative_path(project.get('destination'))
         if len(dest.parts) != 2 or dest.parts[0] not in ('Projects', 'Archives'):
@@ -122,13 +181,17 @@ def load_config(path, allow_empty=False):
     try:
         path = Path(path)
         if allow_empty and not path.exists() and not path.is_symlink():
-            return {'version': 1, 'device': {}, 'projects': []}
-        return validate_config(json.loads(path.read_text()), allow_empty=allow_empty, canonical_sources=True)
+            return with_profiles({'version': 1, 'device': {}, 'projects': []})
+        data = json.loads(path.read_text())
+        if isinstance(data, dict) and isinstance(data.get('profiles'), dict) and data.get('profile') in data['profiles']:
+            data['projects'] = data['profiles'][data['profile']]
+        return validate_config(with_profiles(data), allow_empty=allow_empty, canonical_sources=True)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise BackupError(f'Cannot read registry: {exc}') from exc
 
 
 def save_config(path, config):
+    config = with_profiles(config)
     validate_config(config, allow_empty=True, canonical_sources=True)
     path = Path(path)
     if path.is_symlink():raise BackupError('Settings file is a symlink; choose a regular file.')

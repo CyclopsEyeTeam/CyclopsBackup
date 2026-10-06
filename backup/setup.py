@@ -1,15 +1,40 @@
 """Explicit project registration; no scanning for unrelated folders."""
 from pathlib import Path
+import re
 import subprocess
 
-from .config import BackupError, relative_path, validate_config
+from .config import BackupError, profile_name, relative_path, validate_config, with_profiles
 from .core import inventory
+
+
+def clean_name(text):
+    """Turn any typed or folder name into a safe backup name (spaces etc. become -)."""
+    return re.sub(r'[^A-Za-z0-9._-]+', '-', text or '').strip('-._')
+
+
+def suggest_name(config, source):
+    """Backup name for a folder: reuse the name another profile gives this same folder,
+    otherwise the folder's own name, numbered if another folder already has it."""
+    source = str(Path(source).expanduser().resolve())
+    config = with_profiles(config)
+    taken = {}
+    for projects in config['profiles'].values():
+        for p in projects:taken.setdefault(p['name'], p['source'])
+    for name, owner in taken.items():
+        if owner == source:return name
+    base = clean_name(Path(source).name) or 'Folder'
+    name, n = base, 2
+    while name in taken:name, n = f'{base}-{n}', n + 1
+    return name
 
 
 def add_project(config, name, source, archive=False):
     source = Path(source).expanduser().absolute()
     if source.is_symlink():raise BackupError('Source is a symlink; register its actual location.')
     source = source.resolve()
+    for p in config['projects']:
+        if p['source'] == str(source):
+            raise BackupError(f"That folder is already in this profile as {p['name']!r}.")
     project = {'name': name, 'source': str(source),
                'destination': ('Archives/' if archive else 'Projects/') + name,
                'required_markers': [], 'excludes': []}
@@ -82,5 +107,51 @@ def remove_exclusion(config, name, path):
         raise BackupError(f'{rel} is not excluded from {name}.')
     updated = dict(project, excludes=[e for e in project['excludes'] if e['path'] != rel])
     candidate = dict(config, projects=[updated if p is project else p for p in config['projects']])
+    validate_config(candidate, allow_empty=True, canonical_sources=True)
+    return candidate
+
+
+# Profiles: each one is its own list of folders. The backup USB is shared.
+
+def switch_profile(config, name):
+    config = with_profiles(config)
+    if name not in config['profiles']:raise BackupError(f'No profile named {name!r}.')
+    candidate = dict(config, profile=name, projects=list(config['profiles'][name]))
+    validate_config(candidate, allow_empty=True, canonical_sources=True)
+    return candidate
+
+
+def new_profile(config, name, copy_current=False):
+    """Create a profile and switch to it. Copies nothing on disk."""
+    config = with_profiles(config)
+    name = profile_name(name)
+    if name.casefold() in (n.casefold() for n in config['profiles']):
+        raise BackupError(f'A profile named {name!r} already exists.')
+    projects = [dict(p) for p in config['projects']] if copy_current else []
+    candidate = dict(config, profiles={**config['profiles'], name: projects}, profile=name, projects=projects)
+    validate_config(candidate, allow_empty=True, canonical_sources=True)
+    return candidate
+
+
+def rename_profile(config, old, new):
+    config = with_profiles(config)
+    new = profile_name(new)
+    if old not in config['profiles']:raise BackupError(f'No profile named {old!r}.')
+    if new != old and new.casefold() in (n.casefold() for n in config['profiles']):
+        raise BackupError(f'A profile named {new!r} already exists.')
+    profiles = {(new if n == old else n): v for n, v in config['profiles'].items()}
+    candidate = dict(config, profiles=profiles, profile=new if config['profile'] == old else config['profile'])
+    validate_config(candidate, allow_empty=True, canonical_sources=True)
+    return candidate
+
+
+def delete_profile(config, name):
+    """Forget one profile's folder list. Sources and USB copies are untouched."""
+    config = with_profiles(config)
+    if name not in config['profiles']:raise BackupError(f'No profile named {name!r}.')
+    if len(config['profiles']) == 1:raise BackupError('This is the only profile; there must always be one.')
+    profiles = {n: v for n, v in config['profiles'].items() if n != name}
+    active = config['profile'] if config['profile'] != name else next(iter(profiles))
+    candidate = dict(config, profiles=profiles, profile=active, projects=list(profiles[active]))
     validate_config(candidate, allow_empty=True, canonical_sources=True)
     return candidate

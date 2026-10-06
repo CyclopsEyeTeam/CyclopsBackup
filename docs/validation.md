@@ -1,3 +1,31 @@
+# v1.0.0 release validation
+
+Validated on Linux on 2026-10-06 with Python 3.11, 3.12 and 3.13, rsync 3.2.7,
+Zenity 4.0.1 and GTK 3: **107 tests** pass (one skipped where it needs to run
+as an ordinary user: unreadable-file denial). Syntax is checked against Python
+3.10 for Ubuntu 22.04. The copy, verification and manifest engine (`core.py`,
+`report.py`) is byte-identical to 0.2.0.
+
+Added since 0.2.0 and covered by tests:
+
+- USB gate: backup and preview stay locked until the chosen USB is connected and
+  verified; the waiting window closes itself once it is.
+- Profiles: separate folder lists, switching, copying, renaming and deleting;
+  older settings load as "Default"; runs and manifests record only the active
+  profile; two profiles cannot share a USB destination for different folders.
+- Folders window (GTK 3): real GTK dialog tests fill in the dialogs and press OK,
+  covering the 0.3.0 bug where typed names were read after the dialog closed.
+- End-of-backup popup, and the Zenity 4 `--no-cancel` refusal that kept result
+  and preview windows from opening.
+- The Cyclops look: private stylesheet, both GTK stylesheets parse, the person's
+  own GTK settings are never written, and plain mode falls back cleanly.
+- Installer: eye icon, updating its own older launcher, leaving others alone.
+
+Every panel and window was also rendered on a virtual display and checked by
+eye. The author confirmed a real backup and the new panels on Zorin OS before
+release; a full physical backup of a large project set remains the person's
+own acceptance step.
+
 # v0.2.0 additions
 
 Validated on Linux with Python 3.12 and rsync 3.2.7 on 2026-10-06: **62 tests**

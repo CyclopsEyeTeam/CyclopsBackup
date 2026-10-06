@@ -5,7 +5,7 @@ from pathlib import Path
 import shutil
 import sys
 
-from .config import BackupError, devices, load_config, resolve_device, save_config
+from .config import BackupError, devices, load_config, resolve_device, run_view, save_config
 from . import __version__
 from .core import preview, run_backup, verify_manifest
 from .report import readable, write_reports
@@ -51,7 +51,18 @@ def main(argv=None):
     pv.add_argument('--limit',type=int,default=200,help='With --files: lines shown per folder (0 = all; full list is always saved)')
     run=sub.add_parser('run',help='Review and confirm, then copy and verify')
     run.add_argument('--yes',action='store_true',help='Deliberately approve the entire configured backup')
-    sub.add_parser('gui',help='Open the desktop wizard')
+    sub.add_parser('gui',help='Open the desktop control panel')
+    sub.add_parser('folders',help='Open the folders window (profile dropdown, add/remove/leave out)')
+    sub.add_parser('profiles',help='List profiles; * marks the active one')
+    pu=sub.add_parser('profile-use',help='Make a profile active (its folders are what gets backed up)')
+    pu.add_argument('--name',required=True)
+    pn=sub.add_parser('profile-new',help='Create a profile and make it active')
+    pn.add_argument('--name',required=True)
+    pn.add_argument('--copy',action='store_true',help="Start with a copy of the active profile's folders")
+    pr=sub.add_parser('profile-rename',help='Rename the active profile')
+    pr.add_argument('--name',required=True,help='New name')
+    pd=sub.add_parser('profile-delete',help='Forget one profile; folders and USB copies untouched')
+    pd.add_argument('--name',required=True)
     verify=sub.add_parser('verify',help='Check saved SHA-256 manifest without the original computer')
     verify.add_argument('manifest',type=Path)
     verify.add_argument('--root',required=True,type=Path,help='CyclopsBackup folder or restored layout')
@@ -62,7 +73,23 @@ def main(argv=None):
         if args.action=='verify':
             result=verify_manifest(args.manifest,args.root)
             print(json.dumps(result,indent=2));return 0 if result['ok'] else 2
+        if args.action=='folders':
+            from .folders import open_window
+            return open_window(args.config)
         config=load_config(args.config,allow_empty=True)
+        if args.action=='profiles':
+            for name,projects in config['profiles'].items():
+                mark='*' if name==config['profile'] else ' '
+                print(f"{mark} {name} ({len(projects)} folder{'s' if len(projects)!=1 else ''})")
+            return 0
+        if args.action.startswith('profile-'):
+            from .setup import delete_profile, new_profile, rename_profile, switch_profile
+            if args.action=='profile-use':config=switch_profile(config,args.name)
+            elif args.action=='profile-new':config=new_profile(config,args.name,args.copy)
+            elif args.action=='profile-rename':config=rename_profile(config,config['profile'],args.name)
+            else:config=delete_profile(config,args.name)
+            save_config(args.config,config)
+            print(f"Active profile: {config['profile']}. No data copied.");return 0
         if args.action=='project-add':
             from .setup import add_project
             config=add_project(config,args.name,args.source,args.archive)
@@ -70,6 +97,7 @@ def main(argv=None):
             print(f'Registered {args.name}. Settings: {args.config}. No data copied.');return 0
         if args.action=='projects':
             device=config.get('device') or {}
+            print(f"Profile: {config['profile']}")
             print(f"USB: {device.get('label') or '-'} ({device.get('uuid') or 'not configured'})")
             if not config['projects']:print('No folders registered.')
             for p in config['projects']:
@@ -106,12 +134,13 @@ def main(argv=None):
             if device is None:raise BackupError(problem)
             from .core import change_preview
             from .report import changes_text, write_change_list
-            report=change_preview(config,device,exact=args.exact)
+            report=change_preview(run_view(config),device,exact=args.exact)
             write_reports(report,args.report_dir)
             saved=write_change_list(report,args.report_dir)
             print(changes_text(report,limit=args.limit or None))
             print(f'Full list: {saved}')
             return 0 if report['ok'] else 2
+        config=run_view(config)
         report=preview(config,device)
         if problem:report['failures'].append(problem);report['ok']=False
         write_reports(report,args.report_dir)

@@ -216,25 +216,27 @@ class ControlTests(unittest.TestCase):
         with patch.dict(os.environ, {'DISPLAY': ':fixture'}), \
                 patch('backup.gui.resolve_device', return_value=self.device), \
                 patch('backup.core.resolve_device', return_value=self.device), \
+                patch('backup.gui.gtk_available', return_value=False), \
                 patch('backup.gui.progress_task', side_effect=lambda title, task: task(lambda s: None)), \
                 patch('backup.gui.dialog', side_effect=respond):
             code = gui.launch(self.registry, self.reports)
         return code, seen
 
     def test_gui_remove_folder_then_quit(self):
-        code, _ = self.gui_session([(0, 'remove\n'), (0, 'Evidence\n'), (0, ''), (1, '')])
+        code, _ = self.gui_session([(0, 'folders\n'), (0, 'remove\n'), (0, 'Evidence\n'), (0, ''), (1, ''), (1, '')])
         self.assertEqual(code, 1)
         self.assertEqual([p['name'] for p in load_config(self.registry)['projects']], ['Demo'])
         self.assertEqual((self.other/'capture.bin').read_bytes(), b'\x00evidence')
 
     def test_gui_leave_out_subfolder_then_put_it_back(self):
         code, seen = self.gui_session([
+            (0, 'folders\n'),
             (0, 'exclude\n'), (0, 'Demo\n'), (0, 'folder\n'), (0, str(self.source/'cache')+'\n'),
             (0, 'downloads, rebuildable\n'),
             (0, 'include\n'), (0, 'Demo\tcache\tdownloads, rebuildable\n'),
-            (1, '')])
+            (1, ''), (1, '')])
         self.assertEqual(code, 1)
-        self.assertIn('--directory', seen[3])
+        self.assertIn('--directory', seen[4])
         self.assertEqual(load_config(self.registry)['projects'][0]['excludes'], [])
 
     def test_gui_preview_shows_changes_and_copies_nothing(self):
@@ -249,9 +251,10 @@ class ControlTests(unittest.TestCase):
         # Esc on the preview mode list, then an invalid leave-out, then quit.
         code, seen = self.gui_session([
             (0, 'preview\n'), (1, ''),
+            (0, 'folders\n'),
             (0, 'exclude\n'), (0, 'Demo\n'), (0, 'file\n'), (0, str(self.other/'capture.bin')+'\n'), (0, 'x\n'),
             (0, ''),  # error dialog acknowledged
-            (1, '')])
+            (1, ''), (1, '')])
         self.assertEqual(code, 1)
         self.assertTrue(any('--error' in a for a in seen))
         self.assertFalse((self.usb/'CyclopsBackup').exists())

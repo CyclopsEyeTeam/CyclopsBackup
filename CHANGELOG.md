@@ -1,5 +1,76 @@
 # Release notes
 
+## 1.0.0 — 2026-10-06
+
+First stable release. Everything from 0.2.0–0.3.2 below, plus:
+
+- **The Cyclops look.** Dark navy panels with a single cyan eye accent, green
+  for verified/successful, amber for waiting, red for problems; an eye app
+  icon on the launcher, folders window and result popups. Zenity dialogs are
+  styled through a private settings folder, never the desktop theme
+  (`CYCLOPS_BACKUP_PLAIN=1` turns it off).
+- Re-running `install.py` updates the launcher it made earlier (new icon);
+  any other launcher with the same name is still left untouched.
+- 9 new tests (107 total). Copy and verification engine unchanged since 0.2.0.
+
+## 0.3.2 — 2026-10-06
+
+- After a backup, a popup now says how it went before the application closes:
+  **Backup successful** (folders, profile, data checked and transferred, and
+  that the USB is safe to eject) or **Backup did not complete** (the reasons,
+  and that the USB is not marked safe to eject). **View report** opens the full
+  report.
+- Fix: result and copy-preview windows never opened on Zenity 4 (Zorin 17 /
+  Ubuntu 24.04), because it refuses the `--no-cancel` option those windows
+  used, so the app appeared to just close.
+- 4 new tests (98 total), including a full fixture backup run from the panel.
+
+## 0.3.1 — 2026-10-06
+
+- Fix: Add folder, New profile, Rename and the leave-out reason lost what was
+  typed, because the dialog was read after it had closed. Adding a folder
+  always failed with a misleading "unique simple folder names" error.
+- Fix: the folders window comes back to the front after every dialog instead
+  of dropping behind other windows.
+- Backup names: picking a folder suggests a name (reusing the name another
+  profile already gives that same folder, otherwise numbered if taken); typed
+  names are cleaned (spaces and symbols become -); the dialog shows live where
+  the folder will be saved on the USB.
+- Clear messages: missing name, characters not allowed, name already used in
+  this profile, folder already in this profile (and under which name).
+- 5 new tests (94 total), including real GTK dialog tests for this bug.
+
+## 0.3.0 — 2026-10-06
+
+- **Profiles.** Each profile is its own named list of folders; the active one
+  is what review, preview and backup use. All profiles share the pinned USB.
+  Create (empty or as a copy), switch, rename and delete. Settings from earlier
+  versions load as profile "Default". Backup runs and USB manifests record only
+  the active profile and its name.
+- **One folders menu.** The control panel's Add / Remove / Leave out / Put back
+  rows are collapsed into a single **View folders** row. It opens a window with
+  a profile dropdown at the top, the profile's folder list (left-out items shown
+  under their folder) and buttons for every folder action. GTK 3 via
+  PyGObject; plain Zenity lists are used if GTK is unavailable.
+- Two profiles may share a folder but never a USB destination for different
+  folders.
+- Terminal: `profiles`, `profile-new [--copy]`, `profile-use`, `profile-rename`,
+  `profile-delete`, `folders`.
+- 13 new tests (89 total). Copy and verification engine unchanged.
+
+## 0.2.1 — 2026-10-06
+
+- Launch opens straight into the control panel. The first-run folder wizard and
+  forced USB picker are gone, so nothing is asked before the panel appears.
+- The panel header shows the USB state: verified, not connected, plugged in but
+  not chosen yet, or an unsupported filesystem (e.g. FAT/exFAT/NTFS, named).
+- **Review and back up** and **Preview what will be copied** stay locked (🔒)
+  until the backup USB is connected and passes verification. Choosing one
+  while locked opens a "waiting for USB" window that continues by itself once
+  the USB is verified; Cancel returns to the panel.
+- Folders, leave-outs and put-backs can be set up with no USB connected.
+- 14 new fixture tests (76 total). Copy and verification engine unchanged.
+
 ## 0.2.0 — 2026-10-06
 
 - Desktop control panel after first setup: review and back up, copy preview,

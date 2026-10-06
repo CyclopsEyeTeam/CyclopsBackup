@@ -19,16 +19,18 @@ def install(source,home):
     executable=source/'cyclops-backup'
     if not executable.is_file():raise OSError('Utility executable missing.')
     executable.chmod(executable.stat().st_mode|0o111)
+    icon=source/'assets/cyclops-backup.svg'
     body=('''[Desktop Entry]
 Version=1.0
 Type=Application
 Name=Cyclops Backup
 Comment=Review, back up and verify project folders on your USB
-Icon=drive-removable-media
+Icon={icon}
 Terminal=false
 Categories=Utility;Archiving;
 StartupNotify=true
-'''+f'Exec=/usr/bin/python3 {desktop_quote(executable)} gui\n')
+'''.format(icon=icon if icon.is_file() else 'drive-removable-media')+f'Exec=/usr/bin/python3 {desktop_quote(executable)} gui\n')
+    exec_line=body.splitlines()[-1]
     paths=[home/'.local/share/applications/cyclops-backup.desktop']
     desktop=home/'Desktop'
     if home==Path.home() and shutil.which('xdg-user-dir'):
@@ -38,7 +40,9 @@ StartupNotify=true
     for path in paths:
         path.parent.mkdir(parents=True,exist_ok=True)
         if path.exists() and path.read_text()!=body:
-            raise OSError(f'Existing different launcher left untouched: {path}')
+            # Our own earlier launcher for this same utility is updated; anything else is left alone.
+            if exec_line not in path.read_text().splitlines():
+                raise OSError(f'Existing different launcher left untouched: {path}')
         path.write_text(body);path.chmod(0o755)
         if shutil.which('desktop-file-validate'):
             subprocess.run(['desktop-file-validate',str(path)],check=True)
