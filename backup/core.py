@@ -9,8 +9,8 @@ import stat
 import subprocess
 import uuid
 
-from .config import BackupError, mount_info, relative_path, resolve_device, validate_config
-from .report import atomic_write, readable, write_reports
+from .config import BackupError, SourceMoved, mount_info, relative_path, resolve_device, validate_config
+from .report import atomic_write, readable, size_text, write_reports
 
 
 def run_id():
@@ -108,12 +108,17 @@ def guard_path(root, path):
         if part.is_symlink():raise BackupError(f'Destination contains a symlink: {part}')
 
 
-def rsync_args(project, destination, dry=False, history=None):
+def rsync_args(project, destination, dry=False, history=None, checksum=False, itemize=False):
     args = ['rsync', '-aH', '--no-owner', '--no-group', '--stats']
-    # Dry-run estimates use size/time only, avoiding multi-GB reads in the review.
-    # Copy uses content checksums to repair same-size/time corrupted destinations.
+    # Copies decide by size and time (destination times are preserved), so unchanged
+    # files are not read. SHA-256 verification afterwards still checks every file in a
+    # full check; a mismatch triggers one retry with checksum, which repairs a
+    # same-size/same-time corrupted USB copy.
+    # Compare times to the nanosecond (preview and copy alike): same-second edits are copied.
+    args.append('--modify-window=-1')
     if dry:args.append('--dry-run')
-    else:args.append('--checksum')
+    if checksum:args.append('--checksum')
+    if itemize:args.append('--out-format=%i %n')
     if history:args.extend(['--backup', '--backup-dir='+str(history)])
     for e in project.get('excludes', []):args.append('--exclude=/'+e['path'])
     args.extend(['--', str(Path(project['source']))+'/', str(destination)+'/'])
@@ -145,7 +150,7 @@ def preview(config, device=None, progress=lambda message:None):
               'registry': config, 'verification_scope': 'All included regular files: SHA-256; symlinks and modes; unchanged source inventory.'}
     if device:report['device'] = {'uuid': device.uuid, 'label': device.label, 'mountpoint': str(device.mountpoint), 'fstype': device.fstype}
     for project in config['projects']:
-        progress(f"Reviewing {project['name']}")
+        progress(f"Scanning {project['name']} — listing files (nothing is read or copied yet)")
         row = dict(project, failures=[], warnings=[], estimated_transfer_bytes=None)
         report['projects'].append(row)
         try:
@@ -206,29 +211,40 @@ def sha256(path, expected=None):
     return digest.hexdigest()
 
 
-def verify_project(project, destination, progress):
+def verify_project(project, destination, progress, only=None, tick=lambda hashed:None):
+    """SHA-256 every file (full check), or with `only` just those paths (quick check):
+    the remaining files are still checked for presence, type, size and mode."""
     source = Path(project['source'])
-    hashed = 0;hashed_bytes = 0
+    hashed = 0;hashed_bytes = 0;size_checked = 0
     for index, entry in enumerate(project['files']):
         rel = entry['path'];src = source/rel;dest = destination/rel
         guard_path(destination, dest.parent)
         st = dest.lstat()
         if entry['kind']=='file':
             if not stat.S_ISREG(st.st_mode):raise BackupError(f'Destination is not a regular file: {rel}')
-            if fingerprint(src.lstat()) != entry['snapshot']:raise BackupError(f'Source changed during backup: {rel}')
-            a, b = sha256(src,entry['snapshot']), sha256(dest)
-            if fingerprint(src.lstat()) != entry['snapshot']:raise BackupError(f'Source changed during hashing: {rel}')
-            if a != b:raise BackupError(f'SHA-256 mismatch: {rel}')
+            if fingerprint(src.lstat()) != entry['snapshot']:raise SourceMoved(f'Source changed during backup: {rel}')
             if stat.S_IMODE(st.st_mode) != entry['snapshot'][2]:raise BackupError(f'File mode mismatch: {rel}')
-            entry['sha256']=a;hashed+=1;hashed_bytes+=entry['size']
+            # Quick check: a file rsync left alone is size-checked, unless its USB time differs
+            # from the source to the nanosecond, in which case it is hashed like a changed file.
+            if only is not None and rel not in only and st.st_mtime_ns == entry['snapshot'][1]:
+                if st.st_size != entry['size']:raise SourceMoved(f'Size mismatch: {rel}')
+                entry.pop('sha256', None);size_checked+=1;tick(False)
+                continue
+            try:a = sha256(src,entry['snapshot'])
+            except BackupError as exc:raise SourceMoved(str(exc)) from exc
+            b = sha256(dest)
+            if fingerprint(src.lstat()) != entry['snapshot']:raise SourceMoved(f'Source changed during hashing: {rel}')
+            if a != b:raise SourceMoved(f'SHA-256 mismatch: {rel}')
+            entry['sha256']=a;hashed+=1;hashed_bytes+=entry['size'];tick(True)
         elif entry['kind']=='link':
             if not stat.S_ISLNK(st.st_mode) or os.readlink(dest)!=entry['target']:
                 raise BackupError(f'Symlink mismatch: {rel}')
         else:
             if not stat.S_ISDIR(st.st_mode) or stat.S_IMODE(st.st_mode)!=entry['mode']:
                 raise BackupError(f'Directory/mode mismatch: {rel}')
-        if index % 100 == 0:progress(f"Verifying {project['name']}: {hashed}/{project['file_count']} files")
-    project['verification']={'ok': True, 'algorithm': 'SHA-256', 'hashed_files': hashed, 'hashed_bytes': hashed_bytes}
+        if index % 100 == 0:progress(f"Verifying {project['name']}")
+    project['verification']={'ok': True, 'algorithm': 'SHA-256', 'scope': 'full' if only is None else 'quick',
+                             'hashed_files': hashed, 'hashed_bytes': hashed_bytes, 'size_checked_files': size_checked}
 
 
 def snapshot(entries):
@@ -249,10 +265,123 @@ def sync_device(root, pass_fds=()):
     if result.returncode:raise BackupError(f'USB sync failed: {result.stderr.strip()}')
 
 
-def run_backup(config, device, report_dir, progress=lambda message:None):
+class Counters:
+    """Truthful run totals: what was looked at, left alone, written and checked."""
+    def __init__(self, report, progress):
+        self.report, self.progress = report, progress
+        self.copied = self.bytes_written = 0
+        self.hashed, self.sized = {}, {}   # per folder, reset when a folder is retried
+        self.phase = 'Scanning'
+
+    @property
+    def verified(self):
+        return sum(self.hashed.values())
+
+    @property
+    def size_checked(self):
+        return sum(self.sized.values())
+
+    def restart(self, name):
+        self.hashed[name] = self.sized[name] = 0
+
+    @property
+    def scanned(self):
+        return sum(r.get('file_count', 0) for r in self.report['projects'])
+
+    def line(self):
+        text = (f"Scanned {self.scanned:,} · Unchanged {max(self.scanned - self.copied, 0):,} · "
+                f"Copied {self.copied:,} · Verified {self.verified:,}")
+        if self.size_checked:text += f" · Size-checked {self.size_checked:,}"
+        return text + f" · Written {size_text(self.bytes_written)}"
+
+    def say(self, what):
+        self.progress(f"{what}\n{self.line()}")
+
+    def save(self):
+        self.report['counters'] = {'scanned': self.scanned, 'unchanged': max(self.scanned - self.copied, 0),
+                                   'copied': self.copied, 'verified': self.verified,
+                                   'size_checked': self.size_checked, 'bytes_written': self.bytes_written}
+
+
+def refresh(row, config):
+    """Take a fresh look at one folder before retrying it."""
+    source = Path(row['source'])
+    entries = inventory(row)
+    row.update(files=entries, file_count=sum(e['kind']=='file' for e in entries),
+               link_count=sum(e['kind']=='link' for e in entries),
+               byte_count=sum(e.get('size', 0) for e in entries),
+               git=git_info(source), git_repositories=git_repositories(source, entries, config))
+
+
+def copy_and_verify(row, place, counters, checksum=False, quick=False):
+    """Copy one folder to the USB, then verify it. Raises SourceMoved when a fresh retry can help."""
+    config, device, report, root, pinned_mount, mount_fd = place
+    progress = counters.say
+    assert_device(config, device, mount_fd)
+    if inventory(row)!=snapshot(row['files']):raise SourceMoved('Source changed since preview. Close apps and retry.')
+    destination = root/row['destination']
+    guard_path(pinned_mount, destination)
+    destination.mkdir(exist_ok=True)
+    history = root/'Archives/PreviousVersions'/report['run_id']/row['name']
+    guard_path(pinned_mount, history)
+    counters.phase = 'Copying'
+    progress(f"Copying {row['name']} — comparing and writing new or changed files")
+    # Do not follow destination links at any level during rsync.
+    # A destination link matching a source link is legitimate;
+    # everything else is refused before copying.
+    for entry in row['files']:
+        target = destination/entry['path']
+        guard_path(pinned_mount, target.parent)
+        if target.is_symlink() and entry['kind']!='link':
+            raise BackupError(f'Destination file is a symlink: {entry["path"]}')
+    result = subprocess.run(rsync_args(row, destination, history=history, checksum=checksum, itemize=True),
+                            capture_output=True, text=True, env=dict(os.environ, LC_ALL='C'),pass_fds=(mount_fd,))
+    row['rsync_exit']=result.returncode
+    log = root/'Logs'/(report['run_id']+'.'+row['name']+'.rsync.txt')
+    atomic_write(log, result.stdout+'\n'+result.stderr)
+    if result.returncode:raise BackupError(f'rsync failed ({result.returncode}): {result.stderr.strip()}')
+    written = rsync_stats(result.stdout)
+    sizes = {e['path']: e['size'] for e in row['files'] if e['kind'] == 'file'}
+    copied = {c['path'] for c in parse_itemized(result.stdout, sizes)
+              if c['kind'] == 'file' and c['action'] in ('new', 'changed')}
+    row['transfer_bytes'] = row.get('transfer_bytes', 0) + written
+    row['copied_files'] = sorted(copied | set(row.get('copied_files', [])))
+    counters.copied += len(copied);counters.bytes_written += written
+    assert_device(config, device,mount_fd)
+    counters.phase = 'Verifying'
+    progress(f"Verifying {row['name']} with SHA-256" + (' (new and changed files)' if quick else ''))
+    counters.restart(row['name'])
+    def tick(hashed):
+        bucket = counters.hashed if hashed else counters.sized
+        bucket[row['name']] += 1
+    verify_project(row, destination, lambda m: progress(m), only=set(row['copied_files']) if quick else None, tick=tick)
+    if inventory(row)!=snapshot(row['files']):raise SourceMoved('Source files changed during copy/verification. Retry with apps closed.')
+    if git_repositories(Path(row['source']),row['files'],config)!=row['git_repositories']:
+        raise SourceMoved('Git HEAD/branch changed during backup.')
+
+
+def retry_folder(row, place, counters, retried, quick, reason):
+    """One fresh attempt for a folder that changed: look again, copy with checksum, verify."""
+    retried.add(row['name'])
+    row.setdefault('retries', []).append(str(reason))
+    row.pop('verification', None)
+    counters.restart(row['name'])
+    counters.say(f"{row['name']} changed while backing up — taking a fresh look and trying once more")
+    refresh(row, place[0])
+    copy_and_verify(row, place, counters, checksum=True, quick=quick)
+
+
+def run_backup(config, device, report_dir, progress=lambda message:None, quick=False):
+    """Copy and verify every folder. quick=True SHA-256 checks only new/changed files."""
     report = preview(config, device, progress)
+    counters = Counters(report, progress)
+    report['check'] = 'quick' if quick else 'full'
+    if quick:
+        report['verification_scope'] = ('Quick check: new and changed files SHA-256; unchanged files '
+                                        'checked for presence, size and mode; unchanged source inventory.')
     root = device.mountpoint/'CyclopsBackup'
     lock = None;mount_fd = None
+    retried = set()
     try:
         if not report['ok']:raise BackupError('Preflight failed. Nothing was copied.')
         report['ok']=False
@@ -276,49 +405,40 @@ def run_backup(config, device, report_dir, progress=lambda message:None):
         for name in ('Projects', 'Archives', 'Manifests', 'Logs'):
             guard_path(pinned_mount, root/name);(root/name).mkdir(exist_ok=True)
         report['status']='copying'
+        place = (config, device, report, root, pinned_mount, mount_fd)
         for row in report['projects']:
             try:
-                assert_device(config, device,mount_fd)
-                if inventory(row)!=snapshot(row['files']):raise BackupError('Source changed since preview. Close apps and retry.')
-                destination = root/row['destination']
-                guard_path(pinned_mount, destination)
-                destination.mkdir(exist_ok=True)
-                history = root/'Archives/PreviousVersions'/report['run_id']/row['name']
-                guard_path(pinned_mount, history)
-                progress(f"Copying {row['name']}")
-                # Do not follow destination links at any level during rsync.
-                # A destination link matching a source link is legitimate;
-                # everything else is refused before copying.
-                for entry in row['files']:
-                    target = destination/entry['path']
-                    guard_path(pinned_mount, target.parent)
-                    if target.is_symlink() and entry['kind']!='link':
-                        raise BackupError(f'Destination file is a symlink: {entry["path"]}')
-                result = subprocess.run(rsync_args(row, destination, history=history), capture_output=True,
-                                        text=True, env=dict(os.environ, LC_ALL='C'),pass_fds=(mount_fd,))
-                row['rsync_exit']=result.returncode
-                log = root/'Logs'/(report['run_id']+'.'+row['name']+'.rsync.txt')
-                atomic_write(log, result.stdout+'\n'+result.stderr)
-                if result.returncode:raise BackupError(f'rsync failed ({result.returncode}): {result.stderr.strip()}')
-                row['transfer_bytes']=rsync_stats(result.stdout)
-                assert_device(config, device,mount_fd)
-                progress(f"Verifying {row['name']} with SHA-256")
-                verify_project(row, destination, progress)
-                if inventory(row)!=snapshot(row['files']):raise BackupError('Source files changed during copy/verification. Retry with apps closed.')
-                if git_repositories(Path(row['source']),row['files'],config)!=row['git_repositories']:
-                    raise BackupError('Git HEAD/branch changed during backup.')
+                try:
+                    copy_and_verify(row, place, counters, quick=quick)
+                except SourceMoved as first:
+                    retry_folder(row, place, counters, retried, quick, first)
             except (BackupError, OSError, ValueError) as exc:
                 row['verification']={'ok':False};row['failures'].append(str(exc))
                 report['failures'].append(f'{row["name"]}: {exc}')
         if report['failures']:raise BackupError('One or more projects failed; successful copies are retained for the next run.')
         # Check every source again: an earlier project could change while a later
-        # project was being copied. No success claim from a mixed live snapshot.
-        for row in report['projects']:
-            if inventory(row)!=snapshot(row['files']) or git_repositories(Path(row['source']),row['files'],config)!=row['git_repositories']:
-                raise BackupError(f'{row["name"]}: Source changed before final verification.')
+        # project was being copied. A folder that changed gets one fresh retry; no
+        # success claim from a mixed live snapshot.
+        while True:
+            counters.phase = 'Final check'
+            counters.say('Final check — confirming nothing changed while backing up')
+            changed = [row for row in report['projects']
+                       if inventory(row)!=snapshot(row['files'])
+                       or git_repositories(Path(row['source']),row['files'],config)!=row['git_repositories']]
+            if not changed:break
+            for row in changed:
+                if row['name'] in retried:
+                    raise BackupError(f'{row["name"]}: Source changed before final verification, again after a '
+                                      'fresh retry. Close apps that write to it (or leave it out), then back up again.')
+                try:retry_folder(row, place, counters, retried, quick, 'Source changed before final verification.')
+                except (BackupError, OSError, ValueError) as exc:
+                    row['verification']={'ok':False};row['failures'].append(str(exc))
+                    raise BackupError(f'{row["name"]}: {exc}') from exc
         assert_device(config, device,mount_fd)
+        report['total_bytes'] = sum(r.get('byte_count', 0) for r in report['projects'])
         report['status']='verified';report['data_verified']=True
         report['eject_authorization']='Displayed on screen only after final filesystem sync, report save and device checks.'
+        counters.save()
         write_reports(report, report_dir)
         write_usb_reports(report, root)
         progress('Flushing data and reports to USB')
@@ -336,6 +456,7 @@ def run_backup(config, device, report_dir, progress=lambda message:None):
         report['safe_to_eject']=False;report['ok']=False
         report['status']='cancelled' if isinstance(exc,KeyboardInterrupt) else 'failed'
         report['failures'].append('Cancelled by user.' if isinstance(exc,KeyboardInterrupt) else str(exc))
+        counters.save()
         try:write_reports(report, report_dir)
         except OSError as error:report['failures'].append(f'Local report could not be saved: {error}')
         try:
@@ -384,13 +505,24 @@ def verify_manifest(path, root):
             verification=project['verification']
             if not file_count or file_count!=project['file_count'] or byte_count!=project['byte_count'] or links!=project['link_count']:
                 raise BackupError('Manifest inventory counts or bytes are incomplete.')
-            if verification.get('algorithm')!='SHA-256' or verification.get('hashed_files')!=file_count or verification.get('hashed_bytes')!=byte_count:
+            quick=verification.get('scope')=='quick'
+            if quick:
+                # A quick-check manifest hashes only new/changed files; the rest were checked by size.
+                hashed=[e for e in entries if e['kind']=='file' and 'sha256' in e]
+                if (verification.get('algorithm')!='SHA-256' or verification.get('hashed_files')!=len(hashed)
+                        or verification.get('size_checked_files')!=file_count-len(hashed)):
+                    raise BackupError('Manifest hash coverage is incomplete.')
+            elif verification.get('algorithm')!='SHA-256' or verification.get('hashed_files')!=file_count or verification.get('hashed_bytes')!=byte_count:
                 raise BackupError('Manifest hash coverage is incomplete.')
             for entry in entries:
                 target=destination/relative_path(entry['path'])
                 guard_path(root,target.parent)
                 st=target.lstat()
-                if entry['kind']=='file':
+                if entry['kind']=='file' and quick and 'sha256' not in entry:
+                    if st.st_size!=entry['size'] or stat.S_IMODE(st.st_mode)!=entry['snapshot'][2] or not stat.S_ISREG(st.st_mode):
+                        raise BackupError(f'File size/mode mismatch: {entry["path"]}')
+                    result['size_checked_files']=result.get('size_checked_files',0)+1
+                elif entry['kind']=='file':
                     if not re.fullmatch(r'[0-9a-f]{64}',entry.get('sha256','')):
                         raise BackupError(f'Manifest contains an invalid/unverified hash: {entry["path"]}')
                     if sha256(target)!=entry['sha256']:raise BackupError(f'SHA-256 mismatch: {entry["path"]}')
@@ -404,7 +536,17 @@ def verify_manifest(path, root):
         except (BackupError,OSError,ValueError,KeyError,TypeError,IndexError) as exc:
             result['failures'].append(f'{project["name"]}: {exc}')
     result['ok']=not result['failures']
+    if any(p.get('verification',{}).get('scope')=='quick' for p in report['projects']):
+        result['scope']='quick: unchanged files checked by size only; run a full check to hash everything'
     return result
+
+
+def unescape_rsync(name):
+    """rsync writes bytes it will not print (newlines, non-ASCII under LC_ALL=C) as \\#ooo."""
+    import re
+    if '\\#' not in name:return name
+    raw = re.sub(rb'\\#([0-7]{3})', lambda m: bytes([int(m[1], 8)]), name.encode('utf-8', 'surrogateescape'))
+    return raw.decode('utf-8', 'surrogateescape')
 
 
 ITEM_KINDS = {'f': 'file', 'd': 'folder', 'L': 'link', 'D': 'device', 'S': 'special'}
@@ -418,7 +560,7 @@ def parse_itemized(output, sizes):
         match = re.fullmatch(r'([<>ch.])([fdLDS])([^ ]{9}) (.+)', line)
         if not match:continue
         flag, kind, attrs, name = match.groups()
-        path = name.rstrip('/')
+        path = unescape_rsync(name).rstrip('/')
         if path in ('', '.'):continue
         if flag == '.':action = 'metadata'
         elif set(attrs) == {'+'}:action = 'new'

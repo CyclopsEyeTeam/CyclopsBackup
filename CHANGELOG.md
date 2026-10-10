@@ -1,5 +1,30 @@
 # Release notes
 
+## 1.1.0 — 2026-10-10
+
+- **Faster, honest incremental runs.** Copying now decides by size and
+  nanosecond time instead of reading every file with checksums, so unchanged
+  files are not read just to be skipped. Only new and changed files are written
+  (unchanged before too — now it is also shown).
+- **Full check stays the default** and still SHA-256 verifies every file. A
+  mismatch now triggers one checksum retry of that folder, which repairs a USB
+  copy damaged without its size or time changing.
+- **Quick check (optional):** *Back up — quick check* / `run --quick` SHA-256
+  verifies only new and changed files and checks the rest by size, mode and
+  time. Run a full check regularly.
+- **One fresh retry** for a folder that changes while it is being backed up
+  (during copy, verification or the final check) instead of failing the whole
+  run; a folder that keeps changing still fails, with advice.
+- **Truthful progress:** stages (Scanning · Copying · Verifying · Final check)
+  with live counts — Scanned · Unchanged · Copied · Verified · Written — in the
+  progress window, success/failure popup, reports and terminal.
+- **Panel:** compact header (folder count instead of every name, so the window
+  stays on screen), *Back up — quick check* row, and **Back up now** at the end
+  of a preview (still goes through the normal review and confirmation).
+- Copy previews and copied-file lists decode names rsync escapes (newlines,
+  accented characters).
+- 20 new tests (127 total).
+
 ## 1.0.0 — 2026-10-06
 
 First stable release. Everything from 0.2.0–0.3.2 below, plus:

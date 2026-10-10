@@ -63,9 +63,10 @@ existing launcher is left untouched; the installer reports the conflict.
 
 Every launch opens the **control panel**. Its header shows whether the backup
 USB is verified; without it, backup and preview are locked and a waiting window
-continues by itself once the USB is plugged in. The panel has four things:
-review and back up, preview what will be copied, **View folders**, and the
-backup USB. Every change is saved straight away and copies nothing. Later launches reuse the explicit registry and pinned filesystem UUID. No
+continues by itself once the USB is plugged in. The panel offers **Back up —
+full check** (recommended), **Back up — quick check**, **Preview what will be
+copied** (with **Back up now** at the end of a preview), **View folders**, and
+the backup USB. Every change is saved straight away and copies nothing. Later launches reuse the explicit registry and pinned filesystem UUID. No
 projects are discovered automatically. Missing/moved/empty folders, a missing
 USB, insufficient space, changed source data or failed verification block success.
 Reformatting a USB changes its UUID and requires configuration again.
@@ -86,7 +87,7 @@ are ordinary files, without encryption supplied by this utility.
 
 A **profile** is a named list of folders — for example one for projects you
 back up weekly and one for a large evidence set. The active profile is what
-**Review and back up** and **Preview** use. All profiles share the one pinned
+**Back up** and **Preview** use. All profiles share the one pinned
 backup USB, and a backup run (and its manifest on the USB) covers only the
 active profile.
 
@@ -147,8 +148,10 @@ folder cannot be added on their own; register the folder that holds them.
 **Copy preview** is read-only. It runs the normal review first, then lists each
 folder's items as NEW (not on the USB yet), CHANGED (will be updated; the old USB
 copy goes to PreviousVersions) or PERMS (only permissions/time). Quick mode
-compares size and time; **Exact** compares contents with checksums exactly like
-the real copy, so it reads every file on both sides and is slow on large folders.
+compares size and time exactly like the real copy; **Exact** also compares
+contents with checksums, so it reads every file on both sides and is slow on
+large folders. **Back up now** at the bottom of a preview goes straight to the
+usual review and confirmation, then a full-check backup.
 The full list is saved as `RUN.changes.txt` with the local reports.
 
 `project-add` checks the source, records its canonical location, and copies nothing.
@@ -174,22 +177,35 @@ folders containing nested repositories or unique evidence.
 ## Copy/update and verification behavior
 
 - Reuses the same destination folders; it does not make a full snapshot per run.
-- Actual copying uses `rsync --checksum`. Matching file contents are not copied;
-  only new/changed files transfer. Changed local files are copied in full, while
-  metadata may be updated even if contents match.
+  Only new and changed files are written.
+- Deciding what to copy compares **size and modification time to the
+  nanosecond** (destination times are preserved), the same rule the preview
+  uses. Unchanged files are not read to decide this.
 - Never uses `--delete`. Source-deleted files remain on USB. Replaced files are
   retained under dated `Archives/PreviousVersions` folders. History is not pruned
   automatically.
 - Git folders use the same copying rule, including `.git` and included untracked
-  data. Branch/HEAD information is reported, not used to decide copying.
-- SHA-256 verification reads both copies of **every included regular file**,
-  including unchanged ones. Modes and symlink targets are checked too. Zero
-  bytes copied still entails substantial disk reads.
-- The review shows total included data and **estimated** transfer separately.
-  Its fast size/mtime check can differ from the actual checksum decision: touched
-  identical files can overstate transfer; same-size/mtime corruption can understate
-  it. Use the copy preview for a per-item list. Transfer counts are
-  logical file-content bytes, not physical USB writes or hashing reads.
+  data, and hidden files and folders. Branch/HEAD information is reported, not
+  used to decide copying.
+- **Full check** (the default, *Back up — full check*): after copying, SHA-256
+  reads both copies of **every included regular file**, including unchanged
+  ones, so each run proves the whole USB copy still matches. If any file does
+  not match — including a USB copy damaged without its size or time changing —
+  that folder is copied again once with content checksums, which repairs it,
+  and verified again.
+- **Quick check** (optional, *Back up — quick check* or `run --quick`): new and
+  changed files are SHA-256 verified; unchanged files are checked for presence,
+  type, size, mode and exact time, and any file whose USB time differs is hashed
+  too. Much faster, but silent damage to an unchanged USB copy is only found by
+  the next full check — run one regularly.
+- **A folder that changes while it is being backed up** gets one fresh retry:
+  it is looked at again, copied with content checksums and verified. The final
+  check then confirms nothing changed anywhere; a folder that keeps changing
+  after its retry fails the run with advice (close the app writing to it, or
+  leave it out). No success is claimed from a mixed snapshot.
+- Progress and reports count honestly: **Scanned · Unchanged · Copied · Verified
+  · Written** (plus *Size-checked* in a quick check). *Written* is the file
+  content rsync actually wrote.
 
 Linux modes, symlinks and hard links are preserved. Owner/group identities,
 ACLs and extended attributes are not preserved. External symlink targets are

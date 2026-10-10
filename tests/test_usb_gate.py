@@ -83,9 +83,9 @@ class UsbGateTests(unittest.TestCase):
         self.registered()
         _, seen, _ = self.session([(1, '')])
         rows = seen[0]
-        self.assertIn('Review and back up  🔒', rows)
+        self.assertIn('Back up — full check  🔒', rows)
         self.assertIn('Preview what will be copied  🔒', rows)
-        self.assertLess(rows.index('Connect backup USB'), rows.index('Review and back up  🔒'))
+        self.assertLess(rows.index('Connect backup USB'), rows.index('Back up — full check  🔒'))
         self.assertIn('Use a different USB', rows)
         self.assertIn('View folders', rows)
         self.assertNotIn('Add a folder', rows)
@@ -95,8 +95,9 @@ class UsbGateTests(unittest.TestCase):
         _, seen, _ = self.session([(1, '')], resolve=self.device)
         text = next(a for a in seen[0] if a.startswith('--text='))
         self.assertIn('USB verified: Test USB', text)
-        self.assertIn('Review and back up', seen[0])
-        self.assertNotIn('Review and back up  🔒', seen[0])
+        self.assertIn('Back up — full check', seen[0])
+        self.assertIn('Back up — quick check', seen[0])
+        self.assertNotIn('Back up — full check  🔒', seen[0])
 
     def test_preview_while_locked_waits_and_back_returns_to_panel(self):
         self.registered()
@@ -141,7 +142,7 @@ class UsbGateTests(unittest.TestCase):
         _, seen, _ = self.session([(1, '')], usb_rows=rows)
         text = next(a for a in seen[0] if a.startswith('--text='))
         self.assertIn('vfat', text)
-        self.assertIn('Review and back up  🔒', seen[0])
+        self.assertIn('Back up — full check  🔒', seen[0])
 
     def test_plugged_in_usb_offered_for_choosing_then_preview_runs(self):
         self.registered(device=False)

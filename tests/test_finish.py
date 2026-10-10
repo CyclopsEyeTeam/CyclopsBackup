@@ -29,7 +29,7 @@ class FinishTests(unittest.TestCase):
         return code, seen
 
     def test_successful_backup_shows_popup_then_closes(self):
-        # panel: Review and back up -> review: Run Backup -> popup: Close
+        # panel: Back up — full check -> review: Run Backup -> popup: Close
         code, seen = self.run_from_panel([(0, 'run\n'), (0, ''), (0, '')])
         self.assertEqual(code, 0)
         self.assertTrue((self.usb/'CyclopsBackup/Projects/Demo/README.md').exists())
@@ -37,7 +37,9 @@ class FinishTests(unittest.TestCase):
         self.assertIn('--info', popup)
         text = next(a for a in popup if a.startswith('--text='))
         self.assertIn('Backup successful', text)
-        self.assertIn('2 folders from profile “Default” copied and verified', text)
+        self.assertIn('2 folders from profile “Default”', text)
+        self.assertIn('Full check: every file SHA-256 verified', text)
+        self.assertRegex(text, r'Scanned \d+ · Unchanged 0 · Copied \d+ · Verified \d+ · Written ')
         self.assertIn('Safe to eject Test USB', text)
         self.assertIn('Cyclops Backup will now close', text)
         self.assertIn('--extra-button=View report', popup)

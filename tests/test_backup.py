@@ -343,7 +343,10 @@ class BackupTests(unittest.TestCase):
         self.assertFalse(result['safe_to_eject'])
         self.assertIn('Git',' '.join(result['failures']))
 
-    def test_same_size_mtime_source_replacement_fails_final_snapshot(self):
+    def test_same_size_mtime_source_replacement_is_caught_and_recopied(self):
+        # A same-size, same-time swap after Demo was copied is caught by the final
+        # snapshot; Demo gets one fresh checksum retry, so the USB holds the new
+        # content and never a stale copy.
         second=self.root/'second project';second.mkdir();(second/'data').write_text('two')
         self.config['projects'].append({'name':'Two','source':str(second),'destination':'Projects/Two','excludes':[]})
         def replace_source(message):
@@ -354,7 +357,9 @@ class BackupTests(unittest.TestCase):
                 os.utime(replacement,ns=(before.st_atime_ns,before.st_mtime_ns))
                 replacement.replace(p)
         result=self.run_backup(progress=replace_source)
-        self.assertFalse(result['safe_to_eject'])
+        self.assertTrue(result['safe_to_eject'], result['failures'])
+        self.assertEqual((self.usb/'CyclopsBackup/Projects/Demo/README.md').read_text(), 'evil!!!\n')
+        self.assertEqual(result['projects'][0]['retries'], ['Source changed before final verification.'])
 
     def test_no_durable_eject_claim_before_final_flush(self):
         with patch('backup.core.sync_device',side_effect=BackupError('simulated final flush failure')):

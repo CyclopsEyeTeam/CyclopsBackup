@@ -62,8 +62,8 @@ class LookTests(unittest.TestCase):
             self.skipTest('GTK 3 not installed')
         Gtk.CssProvider().load_from_data(look.GTK3_CSS.encode())   # raises on any parse error
 
-    def test_version_is_1_0(self):
-        self.assertEqual(__version__, '1.0.0')
+    def test_version(self):
+        self.assertEqual(__version__, '1.1.0')
 
 
 class LauncherTests(unittest.TestCase):

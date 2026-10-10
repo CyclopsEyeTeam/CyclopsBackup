@@ -21,23 +21,28 @@ def dialog(*args):
     return subprocess.run(['zenity','--title=Cyclops Backup',*args],capture_output=True,text=True,env=look.dialog_env())
 
 
-def text_dialog(text, confirm=False):
+def text_dialog(text, confirm=False, extra=None, confirm_label='I have reviewed these projects and want to back them up'):
+    """Long text window. Returns True for OK; with `extra`, returns 'extra' when that button is pressed."""
     with tempfile.NamedTemporaryFile(mode='w',prefix='cyclops-review-',suffix='.txt') as file:
         file.write(text);file.flush()
         args=['--text-info','--filename='+file.name,'--width=820','--height=650']
-        if confirm:args.extend(['--checkbox=I have reviewed these projects and want to back them up','--ok-label=Run Backup','--cancel-label=Cancel'])
+        if confirm:args.extend(['--checkbox='+confirm_label,'--ok-label=Run Backup','--cancel-label=Cancel'])
         else:args.append('--ok-label=Close')   # zenity 4 refuses --no-cancel here
-        return dialog(*args).returncode==0
+        if extra:args.append('--extra-button='+extra)
+        result=dialog(*args)
+        if extra and result.returncode and result.stdout.strip()==extra:return 'extra'
+        return result.returncode==0
 
 
 def progress_task(title, task):
     process=subprocess.Popen(['zenity','--title=Cyclops Backup','--progress','--pulsate',
-                              '--text='+look.brand()+'\n\n'+markup(title),'--auto-close','--no-cancel','--width=540'],
+                              '--text='+look.brand()+'\n\n'+markup(title),'--auto-close','--no-cancel','--width=760'],
                              stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,text=True,
                              env=look.dialog_env())
     def progress(message):
         if process.poll() is not None:raise KeyboardInterrupt()
-        try:process.stdin.write('#'+message.replace('\n',' ')+'\n');process.stdin.flush()
+        line=message.replace('\\','\\\\').replace('\n','\\n')
+        try:process.stdin.write('#'+line+'\n');process.stdin.flush()
         except (BrokenPipeError,OSError):raise KeyboardInterrupt()
     try:
         with ThreadPoolExecutor(max_workers=1) as pool:
@@ -95,7 +100,7 @@ def choose_project(config_path, config):
     return True
 
 
-LOCKED = ('run', 'preview')   # need a connected, verified USB
+LOCKED = ('run', 'quick', 'preview')   # need a connected, verified USB
 
 
 def markup(text):
@@ -146,7 +151,8 @@ def folders_row(config):
 
 def menu_rows(config, state):
     if state == 'verified':
-        return [('run', 'Review and back up', 'Check everything, confirm, copy, verify'),
+        return [('run', 'Back up — full check', 'Copy new and changed files, then SHA-256 check every file (recommended)'),
+                ('quick', 'Back up — quick check', 'Copy new and changed files, SHA-256 check only those (faster)'),
                 ('preview', 'Preview what will be copied', 'List new and changed items — copies nothing'),
                 folders_row(config),
                 ('change', 'Change backup USB', 'Pick a different USB drive')]
@@ -156,12 +162,21 @@ def menu_rows(config, state):
                'problem': ('usb', 'Check backup USB again', 'Retry verification after fixing the problem'),
                }.get(state, ('usb', 'Connect backup USB', 'Wait for a USB to be plugged in, then choose it'))
     rows = [connect,
-            ('run', 'Review and back up  🔒', lock),
+            ('run', 'Back up — full check  🔒', lock),
+            ('quick', 'Back up — quick check  🔒', lock),
             ('preview', 'Preview what will be copied  🔒', lock),
             folders_row(config)]
     if state in ('missing', 'problem'):
         rows.append(('change', 'Use a different USB', 'Pick another plugged-in USB instead'))
     return rows
+
+
+def folder_summary(projects, show=4):
+    """'31 folders — Cyclops3D, CyclopsBridge, CyclopsChat, CyclopsCreative +27 more' (keeps the panel on screen)."""
+    if not projects:return 'none yet — open View folders to add some'
+    names = [p['name'] for p in projects]
+    head = ', '.join(names[:show]) + (f' +{len(names) - show} more' if len(names) > show else '')
+    return f"{len(names)} folder{'s' if len(names) != 1 else ''} — {head}"
 
 
 def main_menu(config):
@@ -170,10 +185,10 @@ def main_menu(config):
     banner = (look.good(f'◉ {markup(message)}') if verified else
               look.warn(f'⚠ {markup(message)}') + '\n' +
               look.dim('Backup and copy preview stay locked until the USB is verified. You can still set up folders.'))
-    folders = ', '.join(p['name'] for p in config['projects']) or 'none yet — open View folders to add some'
+    folders = folder_summary(config['projects'])
     profile = config.get('profile') or 'Default'
     args = ['--list', f'--text={look.brand()}\n\n{banner}\n'
-            f'Profile: {look.span(markup(profile), look.EYE, bold=True)} · Folders: {markup(folders)}', '--column=key', '--column=Action',
+            f'Profile: {look.span(markup(profile), look.EYE, bold=True)} · {markup(folders)}', '--column=key', '--column=Action',
             '--column=What it does', '--hide-column=1', '--print-column=1',
             '--width=780', '--height=440', '--ok-label=Open', '--cancel-label=Quit']
     for row in menu_rows(config, state):args.extend(row)
@@ -339,9 +354,10 @@ def zenity_folders(config_path, config):
     while True:
         profile = config.get('profile') or 'Default'
         n = len(config['projects'])
-        listing = '\n'.join(f"  • {markup(p['name'])} — {markup(p['source'])}"
+        listing = '\n'.join(f"  • {markup(p['name'])}"
                             + (f" ({len(p['excludes'])} left out)" if p.get('excludes') else '')
-                            for p in config['projects']) or '  (no folders yet)'
+                            for p in config['projects'][:8]) or '  (no folders yet)'
+        if n > 8:listing += f'\n  … and {n - 8} more'
         args = ['--list', f'--text={look.brand("Folders")}\n\nProfile: {look.span(markup(profile), look.EYE, bold=True)}'
                 f' — {n} folder{"s" if n != 1 else ""}\n{listing}',
                 '--column=key', '--column=Action', '--column=What it does', '--hide-column=1', '--print-column=1',
@@ -398,19 +414,30 @@ def show_change_preview(config, report_dir, device=None):
                            lambda p:change_preview(run_view(config), device, p, exact=exact))
     write_reports(report, report_dir)
     saved = write_change_list(report, report_dir)
-    text_dialog(changes_text(report, limit=2000) + f'\nFull list saved: {saved}\n')
-    return report['ok']
+    answer = text_dialog(changes_text(report, limit=2000) + f'\nFull list saved: {saved}\n',
+                         extra='Back up now' if report['ok'] else None)
+    return 'backup' if answer == 'extra' else report['ok']
 
 
-def review_and_run(config, device, report_dir):
+CHECKS = {
+    False: ('FULL CHECK — new and changed files are copied, then every file is SHA-256 checked '
+            'on both sides (proves the whole USB copy is intact).'),
+    True: ('QUICK CHECK — new and changed files are copied and SHA-256 checked; unchanged files are '
+           'checked for presence, size and time only. Run a full check regularly.'),
+}
+
+
+def review_and_run(config, device, report_dir, quick=False):
     config=run_view(config)
-    report=progress_task('Reviewing projects and estimating the transfer',lambda p:preview(config,device,p))
+    report=progress_task('Scanning folders and estimating the transfer — nothing is copied yet',
+                         lambda p:preview(config,device,p))
     write_reports(report,report_dir)
     if not report['ok']:
         text_dialog(readable(report));return 2
-    if not text_dialog(readable(report),confirm=True):return 1
-    result=progress_task('Backing up and verifying — please keep USB plugged in',
-                         lambda p:run_backup(config,device,report_dir,p))
+    label='I have reviewed these folders and want to back them up' + (' (quick check)' if quick else ' (full check)')
+    if not text_dialog(CHECKS[quick]+'\n\n'+readable(report),confirm=True,confirm_label=label):return 1
+    result=progress_task('Backing up — please keep the USB plugged in',
+                         lambda p:run_backup(config,device,report_dir,p,quick=quick))
     finished(result,config,device)
     return 0 if result['safe_to_eject'] else 2
 
@@ -419,17 +446,28 @@ def finished(result, config, device):
     """Clear end-of-backup popup before the application closes; full report on request."""
     rows = result.get('projects') or []
     profile = markup(config.get('profile') or 'Default')
+    c = result.get('counters') or {}
+    numbers = (f"Scanned {c.get('scanned', 0):,} · Unchanged {c.get('unchanged', 0):,} · Copied {c.get('copied', 0):,} · "
+               f"Verified {c.get('verified', 0):,}" + (f" · Size-checked {c['size_checked']:,}" if c.get('size_checked') else '')
+               + f" · Written {size_text(c.get('bytes_written', 0))}")
+    retried = [r['name'] for r in rows if r.get('retries')]
     if result.get('safe_to_eject'):
-        copied = sum(r.get('transfer_bytes') or 0 for r in rows)
+        quick = result.get('check') == 'quick'
+        check = ('Quick check: new and changed files SHA-256 verified; unchanged files checked by size and time. '
+                 'Run a full check regularly.' if quick else
+                 f"Full check: every file SHA-256 verified ({size_text(result.get('total_bytes') or 0)}).")
         text = (look.brand() + '\n\n' + look.good('✔ Backup successful') + '\n\n'
-                f"{len(rows)} folder{'s' if len(rows) != 1 else ''} from profile “{profile}” copied and verified "
-                f"with SHA-256 ({size_text(result.get('total_bytes') or 0)} checked, {size_text(copied)} transferred).\n\n"
+                f"{len(rows)} folder{'s' if len(rows) != 1 else ''} from profile “{profile}”.\n"
+                + markup(numbers) + '\n' + look.dim(markup(check)) + '\n'
+                + (look.warn('Retried once (changed while backing up): ') + markup(', '.join(retried)) + '\n' if retried else '')
+                + '\n'
                 + look.good(f'Safe to eject {markup(device.label or "the USB")}') + ' — use Files → Eject, then unplug it.\n\n'
                 'Cyclops Backup will now close.')
         kind = '--info'
     else:
         problems = '\n'.join('• '+markup(f) for f in (result.get('failures') or ['Unknown problem.'])[:4])
-        text = (look.brand() + '\n\n' + look.bad('✖ Backup did not complete') + '\n\n'+problems+'\n\n'
+        text = (look.brand() + '\n\n' + look.bad('✖ Backup did not complete') + '\n\n'+problems+'\n'
+                + look.dim(markup(numbers)) + '\n\n'
                 + look.warn('Do not unplug the USB yet') + ' unless you need to — it is not marked safe to eject. '
                 'Copies that finished are kept and the next run continues from them.\n\n'
                 'Cyclops Backup will now close.')
@@ -459,8 +497,9 @@ def launch(config_path,report_dir):
                                           'Open View folders to add some.')
                     device=verified_device(config_path,config)
                     if device is None:continue   # USB not ready or person went back
-                    if choice=='run':return review_and_run(config,device,report_dir)
-                    show_change_preview(config,report_dir,device)
+                    if choice in ('run','quick'):return review_and_run(config,device,report_dir,quick=choice=='quick')
+                    if show_change_preview(config,report_dir,device)=='backup':
+                        return review_and_run(config,device,report_dir)   # Back up now: full check, still reviewed
                 elif choice in actions:
                     actions[choice]()
             except (BackupError,OSError,ValueError) as exc:

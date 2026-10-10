@@ -10,6 +10,10 @@ class BackupError(Exception):
     pass
 
 
+class SourceMoved(BackupError):
+    """The source (or its copy) changed underneath a folder's copy/verify: worth one fresh retry."""
+
+
 @dataclass(frozen=True)
 class Device:
     mountpoint: Path

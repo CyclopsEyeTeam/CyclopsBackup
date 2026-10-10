@@ -51,6 +51,7 @@ def main(argv=None):
     pv.add_argument('--limit',type=int,default=200,help='With --files: lines shown per folder (0 = all; full list is always saved)')
     run=sub.add_parser('run',help='Review and confirm, then copy and verify')
     run.add_argument('--yes',action='store_true',help='Deliberately approve the entire configured backup')
+    run.add_argument('--quick',action='store_true',help='Quick check: SHA-256 only new/changed files (default: full check of every file)')
     sub.add_parser('gui',help='Open the desktop control panel')
     sub.add_parser('folders',help='Open the folders window (profile dropdown, add/remove/leave out)')
     sub.add_parser('profiles',help='List profiles; * marks the active one')
@@ -151,7 +152,10 @@ def main(argv=None):
             if not sys.stdin.isatty():raise BackupError('Confirmation required. Use the desktop launcher or deliberately pass run --yes.')
             if input('Type BACKUP to copy and verify these projects: ').strip()!='BACKUP':
                 print('Cancelled. No data copied.');return 1
-        result=run_backup(config,device,args.report_dir,progress=lambda s:print(s,flush=True))
+        quick=args.action=='run' and args.quick
+        print('Quick check: new and changed files SHA-256 verified; unchanged files checked by size and time.' if quick
+              else 'Full check: every file will be SHA-256 verified on both sides.')
+        result=run_backup(config,device,args.report_dir,progress=lambda s:print(s.replace('\n','  |  '),flush=True),quick=quick)
         print(readable(result));return 0 if result['safe_to_eject'] else 2
     except (BackupError,OSError,ValueError,KeyError) as exc:
         print(f'Cyclops Backup stopped: {exc}',file=sys.stderr);return 2

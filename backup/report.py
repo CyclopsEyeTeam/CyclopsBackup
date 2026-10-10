@@ -24,16 +24,27 @@ def readable(report):
              'Close project apps and recording tools before starting.', '']
     if device:
         lines[4:4]=[f"Mounted at: {device['mountpoint']}",f"Filesystem UUID: {device['uuid']}"]
+    counters=report.get('counters')
+    if counters:
+        line=(f"Scanned {counters['scanned']:,} · Unchanged {counters['unchanged']:,} · Copied {counters['copied']:,} · "
+              f"Verified {counters['verified']:,}")
+        if counters.get('size_checked'):line+=f" · Size-checked {counters['size_checked']:,}"
+        lines[3:3]=[f"Check: {report.get('check', 'full')}", line+f" · Written {size_text(counters['bytes_written'])}"]
     for p in report.get('projects', []):
         git = p.get('git')
         git_text=f"{git['branch']} / HEAD {git['head'] or 'no commit yet'}" if git else 'non-Git project/evidence'
         verification=p.get('verification')
         verification_text=(f"SHA-256: {verification['hashed_files']:,} files verified ({size_text(verification['hashed_bytes'])})"
                            if verification and verification.get('ok') else 'failed' if verification else 'not run')
+        if verification and verification.get('ok') and verification.get('scope')=='quick':
+            verification_text+=f"; {verification.get('size_checked_files',0):,} unchanged files checked by size (quick check)"
         lines.extend([p['name'], f"  Source: {p['source']}", f"  Destination: {p['destination']}",
                       f"  Files: {p.get('file_count', 0)}; links: {p.get('link_count', 0)}; data: {size_text(p.get('byte_count', 0))}",
                       f"  Estimate: {size_text(p.get('estimated_transfer_bytes'))}",
                       f"  Git: {git_text}",f"  Verification: {verification_text}"])
+        if p.get('transfer_bytes') is not None:
+            lines.append(f"  Written: {len(p.get('copied_files', [])):,} files ({size_text(p['transfer_bytes'])})")
+        for why in p.get('retries', []):lines.append(f'  Retried once: {why}')
         for repo in p.get('git_repositories',[]):
             if repo['path']!='.':lines.append(f"  Nested Git {repo['path']}: {repo['branch']} / {repo['head']}")
         for e in p.get('excludes', []):
